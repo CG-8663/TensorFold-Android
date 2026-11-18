@@ -35,6 +35,18 @@ On a Linux or macOS host with Zig 0.17.0, Android NDK r27 or later and `glslang`
 ANDROID_NDK_HOME=/path/to/android-ndk packaging/android/build_android.sh
 ```
 
+Or on the phone itself, in Termux (from F-Droid or GitHub, not the Play Store build), with Zig 0.17.0 unpacked
+from ziglang.org's `aarch64-linux` archive and on `PATH`:
+
+```sh
+pkg install git glslang ndk-sysroot vulkan-headers termux-elf-cleaner
+packaging/android/build_android.sh
+zig-out/android/bin/tf-vulkan-probe --timeout-ms 20000
+```
+
+Built in Termux, the tools run in place from Termux's shell; `adb` is not needed. Do not install a Termux Vulkan
+loader package: the probe should load the system's `libvulkan.so`, which is the Adreno driver's.
+
 The binaries land in `zig-out/android/bin/`. `ANDROID_API` (default 35) picks the NDK crt directory;
 `TF_ANDROID_CPU` passes a Zig `-Dcpu` (for example `generic+v9a+dotprod+i8mm+fullfp16`; Zig's name for
 half-precision arithmetic is `fullfp16`). The probe needs neither.
@@ -86,6 +98,8 @@ shared buffers are usable) should follow these lines, not the chip's data sheet.
   `usr/include/aarch64-linux-android` may need adding in `zig/build/vulkan.zig`.
 - `zig build` stops while configuring, before compiling: some other step in `build.zig` does not accept an
   Android target. The message names the file under `zig/build/`.
+- The phone refuses to start the binary over an underaligned TLS segment: run `termux-elf-cleaner` on it (the
+  build script does when the tool is installed).
 - `error.DriverUnavailable` on the phone: neither `libvulkan.so.1` nor `libvulkan.so` loaded.
 - `error.VulkanVersion`: the driver is below Vulkan 1.3.
 - The contract runner asks for 16-bit storage and fails with `MissingFeature` if the driver lacks it.

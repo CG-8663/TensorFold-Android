@@ -1,8 +1,9 @@
-# Zig libc paths for the Android NDK (r27 or later), aarch64. build_android.sh fills in @SYSROOT@ and @API@
-# and passes the result to `zig build --libc`. Everything links dynamically against the device's bionic.
-include_dir=@SYSROOT@/usr/include
-sys_include_dir=@SYSROOT@/usr/include/aarch64-linux-android
-crt_dir=@SYSROOT@/usr/lib/aarch64-linux-android/@API@
+# Zig libc paths for bionic on aarch64, from the Android NDK (r27 or later) or from Termux's ndk-sysroot package.
+# build_android.sh fills in @INCLUDE@ and @CRT@ and passes the result to `zig build --libc`.
+# Everything links dynamically against the device's bionic.
+include_dir=@INCLUDE@
+sys_include_dir=@INCLUDE@/aarch64-linux-android
+crt_dir=@CRT@
 msvc_lib_dir=
 kernel32_lib_dir=
 gcc_dir=
