@@ -7,7 +7,18 @@ const Error = runtime.Error;
 const check = runtime.check;
 
 /// device: DEVICE_LOCAL, for kernels; staging: HOST_VISIBLE and mapped for its life, for uploads and readbacks.
-pub const Kind = enum { device, staging };
+/// shared: DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT and mapped for its life, for kernels on a unified-memory GPU:
+/// the host writes and reads the kernel's own buffer, so no staging copy. Refused where no such memory type exists.
+pub const Kind = enum {
+    device,
+    staging,
+    shared,
+
+    /// Whether kernels may bind a buffer of this kind and transfers may name it as their device side.
+    pub fn onDevice(kind: Kind) bool {
+        return kind != .staging;
+    }
+};
 
 const usage: c.VkBufferUsageFlags = c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
     c.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -15,6 +26,8 @@ const device_local: c.VkMemoryPropertyFlags = c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_
 const host_visible: c.VkMemoryPropertyFlags = c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
 const host_coherent: c.VkMemoryPropertyFlags = c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 const host_cached: c.VkMemoryPropertyFlags = c.VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+/// What a `shared` buffer's memory type must have.
+pub const shared_flags: c.VkMemoryPropertyFlags = device_local | host_visible | host_coherent;
 /// VK_WHOLE_SIZE.
 const whole_size: c.VkDeviceSize = std.math.maxInt(u64);
 
@@ -25,7 +38,7 @@ pub const Buffer = struct {
     /// The VkBuffer's size in bytes.
     len: u64,
     kind: Kind,
-    /// The whole allocation's host view, for staging buffers only.
+    /// The whole allocation's host view, for staging and shared buffers.
     mapped: ?[*]u8,
     coherent: bool,
 
@@ -44,10 +57,19 @@ pub const Buffer = struct {
         var reqs: c.VkMemoryRequirements = undefined;
         dev.api.vkGetBufferMemoryRequirements(dev.handle, handle, &reqs);
         if (reqs.size > dev.v11.maxMemoryAllocationSize) return error.TooLarge;
-        const required = if (kind == .device) device_local else host_visible;
-        const preferred = if (kind == .device) 0 else host_coherent | host_cached;
-        // the spec guarantees every buffer a DEVICE_LOCAL and a HOST_VISIBLE | HOST_COHERENT type
-        const index = memoryType(&dev.memory, reqs.memoryTypeBits, required, preferred) orelse return error.VulkanFailed;
+        const required: c.VkMemoryPropertyFlags = switch (kind) {
+            .device => device_local,
+            .staging => host_visible,
+            .shared => shared_flags,
+        };
+        const preferred: c.VkMemoryPropertyFlags = switch (kind) {
+            .device => 0,
+            .staging => host_coherent | host_cached,
+            .shared => host_cached,
+        };
+        // the spec guarantees every buffer a DEVICE_LOCAL and a HOST_VISIBLE | HOST_COHERENT type, but not one with both
+        const index = memoryType(&dev.memory, reqs.memoryTypeBits, required, preferred) orelse
+            return if (kind == .shared) error.MissingFeature else error.VulkanFailed;
         const alloc: c.VkMemoryAllocateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
             .allocationSize = reqs.size,
@@ -58,7 +80,7 @@ pub const Buffer = struct {
         errdefer dev.api.vkFreeMemory(dev.handle, memory, null);
         try check(dev.api.vkBindBufferMemory(dev.handle, handle, memory, 0));
         var mapped: ?[*]u8 = null;
-        if (kind == .staging) {
+        if (kind != .device) {
             var p: ?*anyopaque = null;
             try check(dev.api.vkMapMemory(dev.handle, memory, 0, whole_size, 0, &p));
             mapped = @as([*]u8, @ptrCast(p orelse return error.VulkanFailed));
@@ -76,7 +98,7 @@ pub const Buffer = struct {
         self.* = undefined;
     }
 
-    /// Staging bytes only; refuses device-local buffers and lengths beyond the host's address space.
+    /// Staging and shared bytes; refuses device-local buffers and lengths beyond the host's address space.
     pub fn bytes(self: Buffer) Error![]u8 {
         const m = self.mapped orelse return error.NotMapped;
         return m[0 .. std.math.cast(usize, self.len) orelse return error.TooLarge];
@@ -185,4 +207,19 @@ test "memory types honor the buffer's bits, required flags and preferred flags" 
     try std.testing.expectEqual(@as(?u32, 0), memoryType(&props, 0b111, host_visible, host_coherent | host_cached));
     props.memoryTypeCount = 99;
     try std.testing.expectEqual(@as(?u32, 2), memoryType(&props, 0b111, host_visible, host_coherent | host_cached));
+}
+
+test "a shared buffer needs one type that is device-local, host-visible and coherent" {
+    var props = std.mem.zeroes(c.VkPhysicalDeviceMemoryProperties);
+    props.memoryTypeCount = 2;
+    props.memoryTypes[0].propertyFlags = host_visible | host_coherent;
+    props.memoryTypes[1].propertyFlags = device_local;
+    // a discrete GPU's split: no single type serves both sides
+    try std.testing.expectEqual(@as(?u32, null), memoryType(&props, 0b11, shared_flags, host_cached));
+    props.memoryTypeCount = 4;
+    props.memoryTypes[2].propertyFlags = shared_flags;
+    props.memoryTypes[3].propertyFlags = shared_flags | host_cached;
+    try std.testing.expectEqual(@as(?u32, 3), memoryType(&props, 0b1111, shared_flags, host_cached));
+    try std.testing.expectEqual(@as(?u32, 2), memoryType(&props, 0b0111, shared_flags, host_cached));
+    try std.testing.expect(Kind.shared.onDevice() and Kind.device.onDevice() and !Kind.staging.onDevice());
 }

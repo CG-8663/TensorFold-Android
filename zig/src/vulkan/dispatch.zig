@@ -15,7 +15,7 @@ pub const max_bindings = 8;
 /// The shader's set 0: storage buffers 0..bindings-1, its push bytes, and a mask of the bindings it writes.
 pub const Layout = struct { bindings: u32, push_bytes: u32, writes: u32 };
 
-/// A device-local byte range for one binding.
+/// A device or shared buffer's byte range for one binding.
 pub const Binding = struct { buffer: *const Buffer, offset: u64 = 0, len: u64 };
 
 pub const Pipeline = struct {
@@ -127,13 +127,13 @@ pub const Pipeline = struct {
         api.vkDestroyDescriptorSetLayout(h, p.set_layout, null);
     }
 
-    /// Updates checked device-local bindings; call only when no submission using this descriptor set is pending.
+    /// Updates checked device or shared bindings; call only when no submission using this descriptor set is pending.
     pub fn bind(p: *Pipeline, bindings: []const Binding) Error!void {
         if (bindings.len != p.layout.bindings) return error.BadBindings;
         var infos: [max_bindings]c.VkDescriptorBufferInfo = undefined;
         var writes: [max_bindings]c.VkWriteDescriptorSet = undefined;
         for (bindings, 0..) |b, i| {
-            if (b.buffer.kind != .device or b.buffer.dev != p.dev) return error.BadBindings;
+            if (!b.buffer.kind.onDevice() or b.buffer.dev != p.dev) return error.BadBindings;
             if (b.len % 4 != 0) return error.Misaligned; // 32-bit element arrays: a ragged range drops its last element
             infos[i] = try b.buffer.descriptor(b.offset, b.len);
             writes[i] = .{

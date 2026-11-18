@@ -279,12 +279,49 @@ pub const Device = struct {
         return dev;
     }
 
+    /// Every optional feature the physical device offers, enabled on this device or not.
+    pub fn offered(self: *const Device) Features {
+        var chain: Chain = undefined;
+        chain.link();
+        self.rt.api.vkGetPhysicalDeviceFeatures2(self.physical, &chain.f2);
+        return chain.available();
+    }
+
+    /// The physical device's extensions, the caller's to free; entries a racing driver did not fill stay empty names.
+    pub fn extensions(self: *const Device, a: std.mem.Allocator) Error![]c.VkExtensionProperties {
+        var n: u32 = 0;
+        try check(self.rt.api.vkEnumerateDeviceExtensionProperties(self.physical, null, &n, null));
+        const list = a.alloc(c.VkExtensionProperties, n) catch return error.OutOfMemory;
+        errdefer a.free(list);
+        @memset(list, std.mem.zeroes(c.VkExtensionProperties));
+        if (n == 0) return list;
+        const listed = self.rt.api.vkEnumerateDeviceExtensionProperties(self.physical, null, &n, list.ptr);
+        if (listed != c.VK_INCOMPLETE) try check(listed);
+        return list;
+    }
+
     /// Destroys the device; call only when every fence it submitted has signalled and its objects are freed.
     pub fn close(self: *Device) void {
         self.api.vkDestroyDevice(self.handle, null);
         self.* = undefined;
     }
 };
+
+/// Whether `list` names the extension `name`.
+pub fn hasExtension(list: []const c.VkExtensionProperties, name: []const u8) bool {
+    for (list) |e| if (std.mem.eql(u8, std.mem.sliceTo(&e.extensionName, 0), name)) return true;
+    return false;
+}
+
+test "an extension is found by its whole name only" {
+    var list = [_]c.VkExtensionProperties{ std.mem.zeroes(c.VkExtensionProperties), std.mem.zeroes(c.VkExtensionProperties) };
+    const name = "VK_KHR_cooperative_matrix";
+    @memcpy(list[1].extensionName[0..name.len], name);
+    try std.testing.expect(hasExtension(&list, name));
+    try std.testing.expect(!hasExtension(&list, "VK_KHR_cooperative"));
+    try std.testing.expect(!hasExtension(&list, "VK_KHR_shader_bfloat16"));
+    try std.testing.expect(!hasExtension(&.{}, name));
+}
 
 fn queues(flags: c.VkQueueFlags, count: u32) c.VkQueueFamilyProperties {
     return .{ .queueFlags = flags, .queueCount = count };

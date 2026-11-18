@@ -44,6 +44,7 @@ pub const InstanceApi = struct {
     vkGetPhysicalDeviceFeatures2: Fn(c.PFN_vkGetPhysicalDeviceFeatures2),
     vkGetPhysicalDeviceQueueFamilyProperties: Fn(c.PFN_vkGetPhysicalDeviceQueueFamilyProperties),
     vkGetPhysicalDeviceMemoryProperties: Fn(c.PFN_vkGetPhysicalDeviceMemoryProperties),
+    vkEnumerateDeviceExtensionProperties: Fn(c.PFN_vkEnumerateDeviceExtensionProperties),
     vkCreateDevice: Fn(c.PFN_vkCreateDevice),
     vkGetDeviceProcAddr: Fn(c.PFN_vkGetDeviceProcAddr),
 };
@@ -75,11 +76,13 @@ pub const Runtime = struct {
     api: InstanceApi,
 
     pub fn open() Error!Runtime {
-        return openPath(switch (builtin.os.tag) {
-            .windows => "vulkan-1.dll",
-            .macos => "libvulkan.1.dylib",
-            else => "libvulkan.so.1",
-        });
+        return switch (builtin.os.tag) {
+            .windows => openPath("vulkan-1.dll"),
+            .macos => openPath("libvulkan.1.dylib"),
+            // Android's loader is the unversioned /system/lib64/libvulkan.so; it is tried only when the versioned
+            // name is absent, so a host with a loader that fails admission still reports that failure
+            else => openPath("libvulkan.so.1") catch |e| if (e == error.DriverUnavailable) openPath("libvulkan.so") else e,
+        };
     }
 
     /// The loader at `path` and a Vulkan 1.3 instance with no layers or extensions.

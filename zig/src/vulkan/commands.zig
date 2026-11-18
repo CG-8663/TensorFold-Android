@@ -123,9 +123,9 @@ const transfer: u32 = c.VK_PIPELINE_STAGE_TRANSFER_BIT;
 const transfer_write: u32 = c.VK_ACCESS_TRANSFER_WRITE_BIT;
 const transfer_read: u32 = c.VK_ACCESS_TRANSFER_READ_BIT;
 
-/// Both on `dev`, `buf` a device buffer, `staging` a separate staging buffer, and the range inside `buf`.
+/// Both on `dev`, `buf` a device or shared buffer, `staging` a separate staging buffer, and the range inside `buf`.
 pub fn operands(dev: *const Device, buf: Buffer, staging: Buffer, offset: u64, n: u64) Error!void {
-    if (buf.dev != dev or staging.dev != dev or buf.kind != .device or staging.kind != .staging) return error.Invalid;
+    if (buf.dev != dev or staging.dev != dev or !buf.kind.onDevice() or staging.kind != .staging) return error.Invalid;
     if (buf.handle == staging.handle or staging.mapped == null or staging.len == 0) return error.Invalid;
     try memory.span(buf.len, offset, n);
 }

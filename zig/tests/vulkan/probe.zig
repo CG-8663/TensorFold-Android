@@ -73,12 +73,14 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout_ms: u64) !b
         std.debug.print("FAIL device: vendor 0x{x:0>4} is not the requested 0x{x:0>4}\n", .{ pr.vendorID, want });
         return false;
     };
+    try capabilities(a, clock, &dev);
 
     var cmds = try vk.Commands.init(&dev);
     defer cmds.deinit();
     var staging = try vk.Buffer.init(&dev, .staging, staging_bytes);
     defer staging.deinit();
     if (!try roundTrip(a, clock, &dev, &cmds, staging, timeout)) return false;
+    if (!try sharedRoundTrip(a, clock, &dev, &cmds, staging, timeout)) return false;
 
     const layout: dispatch.Layout = .{ .bindings = 5, .push_bytes = @sizeOf(fx.Params), .writes = 1 << 4 };
     var pipe = try dispatch.Pipeline.init(&dev, &shaders.qmm, layout);
@@ -95,6 +97,78 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout_ms: u64) !b
         "within the FP64 bound, {d} repeats each (operator bring-up, not a kernel-contract SUMMARY)\n";
     std.debug.print(say, .{ clock.ms(), name, passed, fx.cases.len, repeats });
     return passed == fx.cases.len;
+}
+
+/// What a backend would have to decide on, as this driver reports it: reported, never assumed from the chip's name.
+fn capabilities(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device) !void {
+    const l = dev.properties.limits;
+    std.debug.print("MILESTONE device-limits elapsed_ms={d} subgroup={d} subgroup_min={d} subgroup_max={d} " ++
+        "shared_memory_bytes={d} workgroup_invocations={d} workgroup_size={any} storage_range={d} " ++
+        "storage_align={d} max_buffer={d} max_allocation={d}\n", .{
+        clock.ms(),               dev.v11.subgroupSize,                 dev.v13.minSubgroupSize,
+        dev.v13.maxSubgroupSize,  l.maxComputeSharedMemorySize,         l.maxComputeWorkGroupInvocations,
+        l.maxComputeWorkGroupSize, l.maxStorageBufferRange,             l.minStorageBufferOffsetAlignment,
+        dev.v13.maxBufferSize,    dev.v11.maxMemoryAllocationSize,
+    });
+    const have = dev.offered();
+    std.debug.print("MILESTONE device-features elapsed_ms={d}", .{clock.ms()});
+    inline for (@typeInfo(vk.Features).@"struct".field_names) |field| {
+        std.debug.print(" {s}={d}", .{ field, @intFromBool(@field(have, field)) });
+    }
+    std.debug.print("\n", .{});
+    const shared = vk.memory.memoryType(&dev.memory, std.math.maxInt(u32), vk.memory.shared_flags, 0);
+    std.debug.print("MILESTONE device-memory elapsed_ms={d} types={d} heaps={d} shared_type={d}\n", .{
+        clock.ms(), dev.memory.memoryTypeCount, dev.memory.memoryHeapCount, if (shared) |i| @as(i64, i) else -1,
+    });
+    const list = try dev.extensions(a);
+    defer a.free(list);
+    std.debug.print("MILESTONE device-extensions elapsed_ms={d} count={d}", .{ clock.ms(), list.len });
+    for ([_][]const u8{
+        "VK_KHR_cooperative_matrix",
+        "VK_KHR_shader_bfloat16",
+        "VK_KHR_shader_integer_dot_product",
+        "VK_KHR_shader_float16_int8",
+        "VK_EXT_external_memory_host",
+        "VK_ANDROID_external_memory_android_hardware_buffer",
+        "VK_KHR_maintenance4",
+    }) |ext| std.debug.print(" {s}={d}", .{ ext, @intFromBool(vk.device.hasExtension(list, ext)) });
+    std.debug.print("\n", .{});
+}
+
+/// Host-written bytes in a shared buffer read back by a GPU copy, and GPU-copied bytes read through the mapping.
+/// A device with no memory type for it is a SKIP: discrete GPUs need not have one.
+fn sharedRoundTrip(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, timeout: u64) !bool {
+    const n = 2 * staging_bytes + 12;
+    var buf = vk.Buffer.init(dev, .shared, n) catch |e| {
+        if (e != error.MissingFeature) return e;
+        std.debug.print("SKIP shared-roundtrip elapsed_ms={d}: no DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT memory type\n", .{clock.ms()});
+        return true;
+    };
+    defer buf.deinit();
+    const sent = try a.alloc(u8, n);
+    defer a.free(sent);
+    const back = try a.alloc(u8, n);
+    defer a.free(back);
+    var prng = std.Random.DefaultPrng.init(0x756d61);
+    prng.random().bytes(sent);
+    @memset(back, 0);
+    const host = try buf.bytes();
+    @memcpy(host, sent);
+    try buf.flush();
+    try vk.orExit(vk.download(cmds, buf, 0, staging, back, timeout));
+    if (std.mem.indexOfDiff(u8, sent, back)) |at| {
+        std.debug.print("FAIL shared-roundtrip: host write, GPU read: first difference at byte {d} of {d}\n", .{ at, n });
+        return false;
+    }
+    prng.random().bytes(sent);
+    try vk.orExit(vk.upload(cmds, buf, 0, staging, sent, timeout));
+    try buf.invalidate();
+    if (std.mem.indexOfDiff(u8, sent, host)) |at| {
+        std.debug.print("FAIL shared-roundtrip: GPU write, host read: first difference at byte {d} of {d}\n", .{ at, n });
+        return false;
+    }
+    std.debug.print("MILESTONE shared-roundtrip-equal elapsed_ms={d} bytes={d} coherent={d}\n", .{ clock.ms(), n, @intFromBool(buf.coherent) });
+    return true;
 }
 
 /// Random bytes through a device-local buffer in several staging chunks and back.
